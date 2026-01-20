@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  entropy-orchestrator:
+    build: .
+    container_name: entropy-orchestrator
+    # Restart automatically unless explicitly stopped
+    restart: unless-stopped
+    
+    ports:
+      - "8000:8000"       # HTTP API
+      - "9000:9000/udp"   # OSC API (SuperCollider/Tidal)
+      - "9001:9001"       # WebSocket API (Hydra/P5.js)
+    
+    # Critical: Pass hardware devices to container
+    # Comment out devices if running in "mock" mode without hardware
+    devices:
+      - "/dev/ttyACM0:/dev/ttyACM0"  # TrueRNG v3
+      - "/dev/bus/usb:/dev/bus/usb"  # RTL-SDR (Requires privileged/USB access)
+    
+    environment:
+      # Options: 'mock', 'serial' (TrueRNG), 'sdr' (RTL-SDR)
+      - SOURCE_TYPE=mock
+      - SERIAL_PORT=/dev/ttyACM0
+      - BUFFER_SIZE=2048
+      - BROADCAST_INTERVAL_MS=100
+    
+    # 'privileged' is often needed for RTL-SDR USB access depending on host OS rules
+    privileged: true
