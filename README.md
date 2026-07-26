@@ -1,136 +1,190 @@
-# EntropyOrchestrator
+# lufs-seed
 
-A production-ready asyncio service that harvests entropy from hardware and serves it via OSC, WebSockets, and HTTP for generative art.
+**Verifiable, provenanced seeds for process work.**
 
-## Overview
+> This is not a better random number generator. On raw unpredictability
+> `os.urandom` is unbeatable and we do not try to beat it. What this buys you
+> is **identity, reproducibility, portability and provenance** for the seed
+> that sits at the head of a generative process — and those are the four
+> things a practice built on *authoring processes rather than outputs*
+> actually needs.
 
-EntropyOrchestrator is a Python-based service designed to collect high-quality entropy from hardware sources (TrueRNG v3 or RTL-SDR) and make it available to generative art systems via multiple protocols:
+A seed minted here is a named object with a signed record you can hand to
+someone else, and they can check every claim in it without trusting you.
 
-- **HTTP API**: RESTful endpoints for accessing random data
-- **OSC Server**: UDP-based Open Sound Control for SuperCollider/TidalCycles
-- **WebSocket Server**: Real-time streaming for Hydra, P5.js, and other web-based generative art tools
+```
+recording bytes -> LSB stream -> audio digest -> seed -> signature
+```
 
-## Features
+Change one sample of the recording and the whole chain breaks. That is the
+property worth having.
 
-- **Multiple Hardware Sources**: Supports TrueRNG v3 serial devices and RTL-SDR receivers
-- **Async Implementation**: Built with asyncio for high-performance concurrent operations
-- **Buffered Streaming**: Decouples hardware read speeds from API access speeds
-- **Musical Quantization**: Converts raw entropy to musical scales and notes
-- **Production Ready**: Includes Docker support, proper logging, and error handling
+## Why this exists
 
-## Architecture
+Before this tool, `seed: 42` in a Score YAML meant nothing checkable. Worse,
+"the same seed" did not even mean the same *stream* — Python's `random`,
+JavaScript's `Math.random` and SuperCollider's RNG all produce different
+output from identical seeds, so a "reproducible" process was only reproducible
+inside one runtime.
 
-The system consists of three main components:
+`lufs-seed` fixes both halves:
 
-1. **Entropy Sources**: 
-   - Hardware-based (TrueRNG v3 via serial, RTL-SDR via rtl_entropy)
-   - Fallback mock source for development/testing
+| | before | after |
+|---|---|---|
+| identity | an integer somebody typed | `lufs-seed-a21dc5db`, content-addressed |
+| reproducibility | hoped for | recomputed and asserted by `verify` |
+| portability | three runtimes, three streams | one HMAC-SHA256 spec, byte-identical |
+| provenance | none | ed25519-signed, bound to an archived recording |
+| commitment | none | a signed timestamp proves the seed pre-existed the output |
 
-2. **Entropy Buffer**: 
-   - Maintains a queue of normalized floating-point values (0.0-1.0)
-   - Handles buffering and rate limiting between hardware and API access
+That last row is the artistic one. A signed, timestamped seed proves you did
+not roll a hundred and keep the pretty one. For a practice whose whole claim
+is *"I authored the process, not the output,"* that turns the claim into
+evidence.
 
-3. **Protocol Servers**: 
-   - HTTP (Quart): REST endpoints for batch data access
-   - OSC (UDP): Query-based protocol for SuperCollider/Tidal integration
-   - WebSocket: Real-time stream for generative art tools
+## Install
 
-## Hardware Requirements
-
-### TrueRNG v3
-- USB serial device (typically `/dev/ttyACM0`)
-- Requires `pyserial` Python library
-
-### RTL-SDR
-- USB SDR receiver (e.g., RTL2832U-based devices)
-- Requires `rtl_entropy` binary to be installed (built in Dockerfile)
-- Requires USB device access privileges
-
-## Configuration
-
-Environment variables:
-
-- `SOURCE_TYPE`: 'mock', 'serial', or 'sdr' (default: 'mock')
-- `SERIAL_PORT`: Serial port path (default: '/dev/ttyACM0')
-- `BUFFER_SIZE`: Size of entropy buffer (default: 1024)
-- `BROADCAST_INTERVAL_MS`: WebSocket broadcast interval in milliseconds (default: 100)
-
-## API Endpoints
-
-### HTTP
-- `GET /batch?count=N`: Get N random floats (max 1000)
-- `GET /status`: Get service status
-
-### OSC
-- `GET /rnd/float`: Logs generated float values (for debugging)
-
-### WebSocket
-- Connect to `ws://localhost:9001` for real-time streaming of entropy values
-
-## Docker Deployment
-
-The application includes a complete Docker setup:
+Python 3.8+. No dependencies for minting and deriving; `cryptography` only if
+you want to sign.
 
 ```bash
-# Build and run with hardware access
-docker-compose up
-
-# Or build manually
-docker build -t entropy-orchestrator .
-docker run --privileged \
-  --device=/dev/ttyACM0:/dev/ttyACM0 \
-  --device=/dev/bus/usb:/dev/bus/usb \
-  -p 8000:8000 -p 9000:9000/udp -p 9001:9001 \
-  entropy-orchestrator
+python3 -m pip install cryptography   # optional, for the certified tier
+python3 -m lufs_seed.cli selftest     # proves the install, no hardware needed
 ```
 
-## Usage Examples
+## The sources
 
-### For Generative Art with Hydra:
-```javascript
-// Connect to WebSocket stream
-const ws = new WebSocket('ws://localhost:9001');
-ws.onmessage = (event) => {
-  const value = parseFloat(event.data);
-  // Use value for generative art
-};
-```
+| source | physical? | what it is |
+|---|---|---|
+| `audio-noise-floor` | yes | Johnson–Nyquist thermal noise from your own preamp. The flagship. |
+| `hwrng` | yes | `/dev/hwrng`, the SoC hardware RNG (present on the Pis). |
+| `jitter` | yes\* | CPU timing jitter. \*Computational unpredictability from an unmodelable microarchitectural state — **not** thermal randomness. Degrades under virtualisation, and the record says so. |
+| `urandom` | **no** | Kernel CSPRNG. Always mixed in, **never** counted toward the entropy budget: unbeatable unpredictability, zero provenance. |
 
-### For TidalCycles:
-```haskell
--- Use OSC to query random values
-d1 $ sound "bd" # pan (lch $ s "osc" 9000 "/rnd/float")
-```
+Sources are combined by concatenate-and-hash, never by averaging or choosing.
+The relevant property: **the result is at least as strong as the single best
+contributor**, so adding a weak source can never weaken the seed.
 
-### For HTTP API:
+### The audio noise floor
+
+Turn the preamp up with nothing plugged in (or better, with the input
+terminated) and record the hiss. At high gain the bottom bits of a 24-bit
+converter are dominated by thermal noise — genuinely physical, genuinely
+unpredictable, from a converter you already own and have more reason to trust
+than a $50 USB dongle.
+
+The health gate is two-sided, and that is the interesting part:
+
+- **too loud** → something is plugged in; you would be seeding from a *signal*,
+  which may be known to someone else. Fail.
+- **too quiet** → muted input or dead converter; there is no noise to harvest.
+  Fail.
+
+20 seconds at 48k yields millions of assessed min-entropy bits against a
+256-bit requirement, so duration is set by wanting a decent health-test window
+and a keepable artifact, not by the math.
+
+## Usage
+
+Mint rarely. Derive constantly.
+
 ```bash
-# Get 10 random floats
-curl "http://localhost:8000/batch?count=10"
+# once per session, or per body of work
+lufs-seed keygen
+lufs-seed mint --audio floor.wav --jitter --sign \
+    --note "kitchen preamp, nothing plugged in"
 
-# Check status
-curl "http://localhost:8000/status"
+# constantly: free, offline, deterministic
+lufs-seed derive "study-07/palette" --record lufs-seed-a21dc5db.seed.json --floats 4
+lufs-seed derive "study-07/pitches" --record lufs-seed-a21dc5db.seed.json --ints 12 --min 0 --max 6
+
+# anyone can check the whole chain
+lufs-seed verify lufs-seed-a21dc5db.seed.json --audio floor.wav
 ```
 
-## Development
+One mint feeds unlimited independent streams: two different labels give
+streams that cannot be distinguished from independent, so every render,
+palette, voice and layer takes its own label off the same seed and none of
+them correlate. **You never mint per-render.**
 
-### Running Locally
+There is no daemon and no network. A service in the middle of a local creative
+pipeline is an availability dependency, and that is against local-first.
+
+## Tiers
+
+Mirrors the Workchain certification ladder:
+
+- **unverified** — no physical source contributed (`urandom` only).
+- **verified** — at least one physical source, all gating health checks
+  passed, entropy budget met.
+- **certified** — verified *and* ed25519-signed.
+
+The tool **refuses to certify a seed with no physical source**: a signature
+over `urandom` would be a signed claim of provenance we do not have.
+
+## Verification
+
+`verify` does not take the record's word for anything. It recomputes the seed
+from the recorded per-source digests, re-derives the audio digest from the wav
+itself, and checks the signature over canonical bytes.
+
+Two distinct bindings on the recording, doing different jobs:
+
+- `content_sha256` over the whole file — **provenance**. Any edit at all breaks it.
+- the LSB digest — **entropy**. Proves the seed came out of this noise.
+
+Only the second feeds the seed. Both are inside the signed payload, so editing
+the audible upper bits of the recording while leaving the noise floor intact is
+caught by the first. (There is a test for exactly this.)
+
+## Portability
+
+`contrib/lufs-seed-derive.mjs` is a dependency-free JavaScript port of the
+derivation half, for browser-side rendering. `tests/fixtures/derivation-vectors.json`
+is generated by the Python implementation, and `tests/check_js_vectors.mjs`
+asserts the port reproduces it byte for byte — including the 8160-byte chunking
+boundary and float bit-exactness. If the two ever disagree, CI fails.
+
+The spec is HMAC-SHA256 and nothing else, deliberately: a faithful
+reimplementation is ~60 lines in any language with a standard library, so
+SuperCollider is a straightforward next port.
+
+## Verifiable correctness
+
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Run with mock source (no hardware required)
-SOURCE_TYPE=mock python main.py
+python3 -m pytest tests/ -q          # 67 tests
+node tests/check_js_vectors.mjs      # 12 cross-language vectors
+python3 -m lufs_seed.cli selftest    # end-to-end, no hardware
 ```
 
-### Testing Hardware Sources
-```bash
-# With TrueRNG v3
-SOURCE_TYPE=serial python main.py
+The HKDF core is checked against the published **RFC 5869** test vectors, so it
+is standards-correct rather than merely self-consistent. Health tests follow
+**NIST SP 800-90B** (repetition count, adaptive proportion, and the
+conservative most-common-value min-entropy estimator — chosen because it
+under-reports a good source and cannot be talked into over-reporting a bad
+one).
 
-# With RTL-SDR (requires rtl_entropy to be built and installed)
-SOURCE_TYPE=sdr python main.py
-```
+## Exit codes
 
-## License
+| code | meaning |
+|---|---|
+| 0 | success |
+| 2 | usage error |
+| 3 | a required source was unavailable |
+| 4 | a health check failed |
+| 5 | entropy budget not met |
+| 6 | verification failed |
+| 7 | signing/key error |
 
-MIT
+## History
+
+This repo began in January 2026 as `EntropyOrchestrator`: an asyncio service
+serving hardware RNG over HTTP, WebSocket and OSC. It never ran — `python_osc`
+is not the module name — and it had **four silent `os.urandom` fallbacks**, so
+a consumer could never tell whether bytes came from hardware or the kernel. A
+service whose entire value proposition is provenance, lying about provenance,
+is the purest form of *exit 0 but wrong*.
+
+The rewrite keeps the good instinct (self-owned entropy is worth having) and
+throws out the framing (more randomness, served faster). Nothing here falls
+back. Ever.
